@@ -332,14 +332,13 @@ public:
     }
 };
 
-// ---------------- Boton en el menu principal ----------------
+// ---------------- Boton en el menu principal (solo texto) ----------------
 class $modify(VersusMenu, MenuLayer) {
     bool init() {
         if (!MenuLayer::init()) return false;
 
-        auto spr = CircleButtonSprite::createWithSprite(
-            "versus-icon.png"_spr, 1.f, CircleBaseColor::Green, CircleBaseSize::Medium
-        );
+        auto spr = ButtonSprite::create("Versus");
+        spr->setScale(0.6f);
         auto btn = CCMenuItemSpriteExtra::create(spr, this, menu_selector(VersusMenu::onVersus));
         btn->setID("versus-button");
 
@@ -349,7 +348,7 @@ class $modify(VersusMenu, MenuLayer) {
         } else {
             auto m = CCMenu::create();
             m->addChild(btn);
-            m->setPosition(ccp(40.f, 40.f));
+            m->setPosition(ccp(60.f, 40.f));
             this->addChild(m);
         }
         return true;
