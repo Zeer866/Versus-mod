@@ -1,6 +1,9 @@
 {
   "geode": "6.0.0",
-  "gd": "2.2091",
+  "gd": {
+    "win": "2.2091",
+    "android": "2.2091"
+  },
   "version": "v0.1.0",
   "id": "zeer.versus",
   "name": "Versus",
