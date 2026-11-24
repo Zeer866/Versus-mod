@@ -89,7 +89,7 @@ public:
         m_outbox.clear();
 
         auto req = web::WebRequest();
-        req.timeout(std::chrono::seconds(5));
+        req.timeout(asp::time::Duration::fromSecs(5));
         req.bodyJSON(body);
         m_holder.spawn(req.post(VERSUS_URL), [this](web::WebResponse res) {
             m_busy = false;
