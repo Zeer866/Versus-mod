@@ -59,7 +59,7 @@ public:
 
         auto glm = GameLevelManager::get();
         glm->m_levelDownloadDelegate = this;
-        glm->downloadLevel(id, false);
+        glm->downloadLevel(id, false, 0);
     }
 
     // Entra al nivel cuando empieza la carrera
@@ -97,7 +97,7 @@ private:
     GJGameLevel* m_level = nullptr;
 
     void openLevel() {
-        auto scene = PlayLayer::scene(m_level, false, false);
+        auto scene = PlayLayer::scene(m_level, false);
         CCDirector::get()->replaceScene(CCTransitionFade::create(0.5f, scene));
     }
 };
