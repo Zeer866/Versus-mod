@@ -5,6 +5,7 @@
 #include <Geode/utils/async.hpp>
 #include <Geode/utils/web.hpp>
 #include <cctype>
+#include <functional>
 #include <unordered_map>
 
 using namespace geode::prelude;
@@ -24,6 +25,83 @@ static std::string versusName() {
     return n.empty() ? std::string("Player") : n;
 }
 
+static std::string shorten(std::string const& s, size_t n) {
+    if (s.size() <= n) return s;
+    return s.substr(0, n - 1) + ".";
+}
+
+// ---------------- Descarga y entrada automatica al nivel ----------------
+class VersusLoader : public LevelDownloadDelegate {
+public:
+    static VersusLoader& get() {
+        static VersusLoader inst;
+        return inst;
+    }
+
+    std::function<void()> onReady;
+
+    // Descarga el nivel (o marca listo si ya estas dentro de el)
+    void prepare(int id) {
+        m_id = id;
+        m_ready = false;
+        m_pending = false;
+        if (m_level) {
+            m_level->release();
+            m_level = nullptr;
+        }
+
+        auto pl = PlayLayer::get();
+        if (pl && pl->m_level && pl->m_level->m_levelID.value() == id) {
+            m_ready = true;
+            if (onReady) onReady();
+            return;
+        }
+
+        auto glm = GameLevelManager::get();
+        glm->m_levelDownloadDelegate = this;
+        glm->downloadLevel(id, false);
+    }
+
+    // Entra al nivel cuando empieza la carrera
+    void enter(int id) {
+        auto pl = PlayLayer::get();
+        if (pl && pl->m_level && pl->m_level->m_levelID.value() == id) return;
+        if (m_ready && m_level) {
+            this->openLevel();
+        } else {
+            m_pending = true; // aun descargando: entra en cuanto termine
+        }
+    }
+
+    void levelDownloadFinished(GJGameLevel* level) override {
+        if (!level || level->m_levelID.value() != m_id) return;
+        if (m_level) m_level->release();
+        m_level = level;
+        m_level->retain();
+        m_ready = true;
+        if (onReady) onReady();
+        if (m_pending) {
+            m_pending = false;
+            this->openLevel();
+        }
+    }
+
+    void levelDownloadFailed(int) override {
+        Notification::create("Versus: no se pudo descargar el nivel", NotificationIcon::Error)->show();
+    }
+
+private:
+    int m_id = 0;
+    bool m_ready = false;
+    bool m_pending = false;
+    GJGameLevel* m_level = nullptr;
+
+    void openLevel() {
+        auto scene = PlayLayer::scene(m_level, false, false);
+        CCDirector::get()->replaceScene(CCTransitionFade::create(0.5f, scene));
+    }
+};
+
 // ---------------- Red (HTTP polling) ----------------
 class VersusNet {
 public:
@@ -38,6 +116,7 @@ public:
     int hostId = 0;
     int countdown = 0;
     std::string code;
+    std::string levelName;
     std::string state = "none";
     std::vector<std::pair<int, std::string>> players;
     std::vector<VersusGhost> ghosts;
@@ -49,11 +128,16 @@ public:
         m_closing = false;
         send(matjson::makeObject({{"t", "create"}, {"name", name}, {"level", level}}));
     }
+    void createRandom(std::string name) {
+        m_closing = false;
+        send(matjson::makeObject({{"t", "create"}, {"name", name}, {"random", true}}));
+    }
     void joinRoom(std::string roomCode, std::string name) {
         m_closing = false;
         send(matjson::makeObject({{"t", "join"}, {"code", roomCode}, {"name", name}}));
     }
     void startRace() { send(matjson::makeObject({{"t", "start"}})); }
+    void sendReady() { send(matjson::makeObject({{"t", "ready"}})); }
     void sendFinish() { send(matjson::makeObject({{"t", "finish"}})); }
     void sendPos(float x, float y, float rot, float pct) {
         send(matjson::makeObject({
@@ -68,6 +152,7 @@ public:
         send(matjson::makeObject({{"t", "leave"}}));
         m_closing = true;
         code.clear();
+        levelName.clear();
         state = "none";
         players.clear();
         ghosts.clear();
@@ -118,6 +203,7 @@ private:
         m_closing = false;
         m_fails = 0;
         code.clear();
+        levelName.clear();
         state = "none";
         players.clear();
         ghosts.clear();
@@ -157,6 +243,7 @@ private:
         if (t == "room") {
             code = m["code"].asString().unwrapOr("");
             levelID = (int)m["level"].asInt().unwrapOr(0);
+            levelName = m["levelName"].asString().unwrapOr("");
             hostId = (int)m["host"].asInt().unwrapOr(0);
             state = m["state"].asString().unwrapOr("lobby");
             players.clear();
@@ -169,12 +256,19 @@ private:
                     });
                 }
             }
+        } else if (t == "prepare") {
+            levelID = (int)m["level"].asInt().unwrapOr(levelID);
+            state = "loading";
+            auto& loader = VersusLoader::get();
+            loader.onReady = [] { VersusNet::get().sendReady(); };
+            loader.prepare(levelID);
         } else if (t == "countdown") {
             countdown = (int)m["seconds"].asInt().unwrapOr(0);
             state = "countdown";
         } else if (t == "go") {
             state = "racing";
             Notification::create("Versus: YA!")->show();
+            VersusLoader::get().enter(levelID);
         } else if (t == "snap") {
             ghosts.clear();
             auto arr = m["players"].asArray();
@@ -253,15 +347,16 @@ protected:
             auto btn = CCMenuItemSpriteExtra::create(spr, this, cb);
             m_buttonMenu->addChildAtPosition(btn, Anchor::Center, pos);
         };
-        addBtn("Crear", menu_selector(VersusPopup::onCreate), ccp(-100, 20));
-        addBtn("Unirse", menu_selector(VersusPopup::onJoin), ccp(0, 20));
-        addBtn("Salir", menu_selector(VersusPopup::onLeave), ccp(100, 20));
-        addBtn("Iniciar", menu_selector(VersusPopup::onStart), ccp(-60, -15));
-        addBtn("Abrir nivel", menu_selector(VersusPopup::onOpenLevel), ccp(60, -15));
+        addBtn("Crear", menu_selector(VersusPopup::onCreate), ccp(-110, 25));
+        addBtn("Aleatorio", menu_selector(VersusPopup::onRandom), ccp(0, 25));
+        addBtn("Unirse", menu_selector(VersusPopup::onJoin), ccp(110, 25));
+        addBtn("Iniciar", menu_selector(VersusPopup::onStart), ccp(-110, -10));
+        addBtn("Abrir nivel", menu_selector(VersusPopup::onOpenLevel), ccp(0, -10));
+        addBtn("Salir", menu_selector(VersusPopup::onLeave), ccp(110, -10));
 
         m_info = CCLabelBMFont::create("", "chatFont.fnt");
         m_info->setScale(0.7f);
-        m_mainLayer->addChildAtPosition(m_info, Anchor::Center, ccp(0, -75));
+        m_mainLayer->addChildAtPosition(m_info, Anchor::Center, ccp(0, -70));
 
         this->schedule(schedule_selector(VersusPopup::refresh), 0.25f);
         this->refresh(0.f);
@@ -272,20 +367,28 @@ protected:
         auto& net = VersusNet::get();
         std::string s;
         if (!net.inRoom()) {
-            s = "Crea una sala (pon el ID del nivel)\no unete con un codigo.";
+            s = "Crea una sala con el ID de un nivel,\ntoca Aleatorio o unete con un codigo.";
         } else {
-            s = fmt::format("Sala: {}   Nivel: {}\n", net.code, net.levelID);
-            if (net.state == "countdown") {
-                s += fmt::format("Abre el nivel! Empieza en {}s\n", net.countdown);
+            std::string lvl = net.levelName.empty()
+                ? std::to_string(net.levelID)
+                : fmt::format("{} ({})", shorten(net.levelName, 18), net.levelID);
+            s = fmt::format("Sala: {}   Nivel: {}\n", net.code, lvl);
+            if (net.state == "loading") {
+                s += "Descargando el nivel... esperando a todos\n";
+            } else if (net.state == "countdown") {
+                s += fmt::format("Empieza en {}s\n", net.countdown);
             } else if (net.state == "racing") {
                 s += "CARRERA EN CURSO\n";
             } else {
-                s += "En espera\n";
+                s += "En espera (el host toca Iniciar)\n";
             }
-            s += fmt::format("Jugadores ({}):\n", net.players.size());
+            std::string names;
             for (auto& [id, name] : net.players) {
-                s += fmt::format(" - {}{}\n", name, id == net.hostId ? " (host)" : "");
+                if (!names.empty()) names += ", ";
+                names += name;
+                if (id == net.hostId) names += "*";
             }
+            s += fmt::format("Jugadores ({}): {}", net.players.size(), shorten(names, 55));
         }
         m_info->setString(s.c_str());
     }
@@ -297,6 +400,11 @@ protected:
             return;
         }
         VersusNet::get().createRoom(versusName(), lvl);
+    }
+
+    void onRandom(CCObject*) {
+        Notification::create("Eligiendo nivel aleatorio...")->show();
+        VersusNet::get().createRandom(versusName());
     }
 
     void onJoin(CCObject*) {
